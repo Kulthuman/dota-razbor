@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Разбор поражений</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: #f4f5f8; --card: #ffffff; --line: #e1e4ec; --text: #171a22; --dim: #667085;
+    --red: #e5484d; --amber: #f0a020; --green: #1f9d63; --blue: #2f6fed; --track: #e9ecf3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #12151c; --card: #1b202b; --line: #2b3242; --text: #e9edf5; --dim: #8b95a8; --red: #ff6369; --amber: #ffb84d; --green: #3ccf8e; --blue: #6ea8ff; --track: #2a3040; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px 16px 40px; }
+  h1 { font-size: 20px; margin: 4px 0 2px; }
+  h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); margin: 26px 0 10px; font-weight: 700; }
+  .sub { color: var(--dim); font-size: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; }
+  .me { display: flex; align-items: center; gap: 14px; }
+  .ava { width: 56px; height: 56px; border-radius: 14px; background: var(--track); object-fit: cover; flex: none; }
+  .grow { flex: 1; min-width: 0; }
+  .nm { font-weight: 700; font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  button { font: inherit; cursor: pointer; border: 0; border-radius: 12px; padding: 9px 14px; background: var(--blue); color: #fff; font-weight: 600; }
+  button.ghost { background: var(--track); color: var(--text); }
+  button:disabled { opacity: .5; cursor: default; }
+  .search { display: flex; gap: 8px; }
+  .search input { flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 11px 12px; }
+  .search input:focus { outline: 2px solid var(--blue); border-color: transparent; }
+  .list { display: grid; gap: 10px; margin-top: 12px; }
+  .cand { display: flex; gap: 12px; align-items: center; }
+  .cand .grow > div { overflow-wrap: anywhere; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+  .chip { background: var(--track); border-radius: 999px; padding: 2px 9px; font-size: 12px; }
+  .warn { background: color-mix(in srgb, var(--amber) 16%, transparent); border: 1px solid var(--amber); border-radius: 12px; padding: 10px 12px; margin-top: 12px; font-size: 14px; }
+  .match { display: grid; grid-template-columns: 56px 1fr auto; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); color: inherit; text-decoration: none; }
+  .match:first-child { border-top: 0; }
+  .match img { width: 56px; height: 32px; border-radius: 6px; object-fit: cover; background: var(--track); }
+  .match b { display: block; }
+  .res { font-weight: 800; font-size: 13px; padding: 3px 9px; border-radius: 8px; }
+  .res.w { color: var(--green); background: color-mix(in srgb, var(--green) 14%, transparent); }
+  .res.l { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
+  .hidden { display: none; }
+  .msg { text-align: center; padding: 18px; color: var(--dim); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Разбор поражений</h1>
+  <div class="sub" id="lead">Загружаю…</div>
+
+  <div id="meBox"></div>
+
+  <section id="findBox" class="hidden">
+    <h2>Найти себя</h2>
+    <form class="search" id="form">
+      <input id="q" type="search" placeholder="Твой ник, ID или ссылка на профиль" autocomplete="off" enterkeyhint="search">
+      <button type="submit">Найти</button>
+    </form>
+    <div class="sub" style="margin-top:8px">Ник пиши как в Steam. Сначала показываем тех, кто играл недавно.</div>
+    <div id="results" class="list"></div>
+  </section>
+
+  <section id="gamesBox" class="hidden">
+    <h2>Мои последние игры</h2>
+    <div class="card" id="games"></div>
+  </section>
+  <p class="sub" style="margin-top:28px;font-size:12px">Данные: <a href="https://www.opendota.com" style="color:inherit">OpenDota</a>. Проект не связан с Valve.</p>
+</main>
+<script type="module">
+import { account, findPlayers, overview, rankName } from './lib.js';
+(() => {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+  const $ = (id) => document.getElementById(id);
+
+  // Все тексты — через textContent, чтобы ник игрока не мог вставить в страницу разметку.
+  function el(tag, cls, text, kids) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    (kids || []).forEach((k) => k && n.appendChild(k));
+    return n;
+  }
+  function img(src, cls) { const i = el('img', cls); i.alt = ''; i.loading = 'lazy'; if (src) i.src = src; i.onerror = () => { i.style.visibility = 'hidden'; }; return i; }
+
+  const rank = rankName;
+  const dt = (iso) => (iso ? new Date(iso).toLocaleDateString('ru-RU') : 'давно');
+
+  const PRIVACY = 'Похоже, у игрока закрыта история матчей. В Dota 2: Настройки → Опции → Социальные → «Expose Public Match Data» (включить). Новые матчи появятся не сразу.';
+
+  async function loadMe() {
+    const box = $('meBox'); box.textContent = '';
+    const id = await account.get();
+    let me = { linked: false };
+    if (id) {
+      $('lead').textContent = 'Загружаю твои игры…';
+      try { me = { linked: true, ...(await overview(id)) }; }
+      catch (e) { $('lead').textContent = e.message; me = { linked: true, accountId: id, name: `ID ${id}`, avatar: null, rankTier: null, hidden: null, matches: [] }; }
+    }
+    if (me.linked) {
+      if (me.matches.length || me.hidden) $('lead').textContent = 'Твой аккаунт привязан. Выбери игру для разбора.';
+      const change = el('button', 'ghost', 'Сменить');
+      change.addEventListener('click', () => { $('findBox').classList.toggle('hidden'); $('q').focus(); });
+      box.appendChild(el('h2', null, 'Мой аккаунт'));
+      box.appendChild(el('div', 'card me', null, [
+        img(me.avatar, 'ava'),
+        el('div', 'grow', null, [el('div', 'nm', me.name), el('div', 'sub', `${rank(me.rankTier)} · ID ${me.accountId}`)]),
+        change,
+      ]));
+      if (me.hidden) box.appendChild(el('div', 'warn', PRIVACY));
+      $('findBox').classList.add('hidden');
+      renderGames(me.matches || []);
+    } else {
+      $('lead').textContent = 'Найди себя по нику, ID или ссылке на профиль — и выбери игру для разбора.';
+      $('findBox').classList.remove('hidden');
+      $('gamesBox').classList.add('hidden');
+    }
+  }
+
+  function renderGames(list) {
+    const g = $('games'); g.textContent = '';
+    $('gamesBox').classList.toggle('hidden', !list.length);
+    list.forEach((m) => {
+      const d = new Date(m.startTime * 1000);
+      const a = el('a', 'match', null, [
+        img(m.heroImg),
+        el('div', null, null, [el('b', null, m.hero), el('span', 'sub', `${m.kills}/${m.deaths}/${m.assists} · ${d.toLocaleDateString('ru-RU')}`)]),
+        el('span', 'res ' + (m.win ? 'w' : 'l'), m.win ? 'Победа' : 'Поражение'),
+      ]);
+      a.href = `report.html?match=${m.matchId}`;
+      g.appendChild(a);
+    });
+  }
+
+  async function choose(p, btn) {
+    btn.disabled = true; btn.textContent = 'Привязываю…';
+    try { await account.set(p.accountId); $('results').textContent = ''; $('q').value = ''; await loadMe(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+    catch (e) { btn.disabled = false; btn.textContent = 'Это я'; alert(e.message); }
+  }
+
+  function renderResults(players) {
+    const box = $('results'); box.textContent = '';
+    if (!players.length) { box.appendChild(el('div', 'msg', 'Никого не нашли. Проверь написание ника или вставь ID / ссылку на профиль.')); return; }
+    players.forEach((p) => {
+      const btn = el('button', null, 'Это я');
+      btn.addEventListener('click', () => choose(p, btn));
+      const chips = el('div', 'chips', null, [el('span', 'chip', rank(p.rankTier)), el('span', 'chip', `игра: ${dt(p.lastMatch)}`), ...p.heroes.map((h) => el('span', 'chip', h))]);
+      box.appendChild(el('div', 'card cand', null, [
+        img(p.avatar, 'ava'),
+        el('div', 'grow', null, [el('div', 'nm', p.name), chips, p.hidden ? el('div', 'sub', 'Матчей не видно — профиль закрыт?') : null]),
+        btn,
+      ]));
+    });
+  }
+
+  $('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = $('q').value.trim();
+    if (q.length < 2) return;
+    $('results').textContent = ''; $('results').appendChild(el('div', 'msg', 'Ищу…'));
+    try { renderResults(await findPlayers(q)); }
+    catch (err) { $('results').textContent = ''; $('results').appendChild(el('div', 'msg', err.message)); }
+  });
+
+  loadMe();
+})();
+</script>
+</body>
+</html>
