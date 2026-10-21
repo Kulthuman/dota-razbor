@@ -4,7 +4,7 @@
 // Показатели, для которых у матча нет данных (например, нет минутных рядов), просто
 // не учитываются, а вес остальных пересчитывается.
 
-export const MODEL_VERSION = 4;
+export const MODEL_VERSION = 5;
 
 const clamp = (x, a = 0, b = 100) => Math.max(a, Math.min(b, x));
 const sum = (arr, f) => arr.reduce((a, x) => a + (f(x) || 0), 0);
@@ -231,11 +231,165 @@ function buildEvents(m, p, adv, deathTs) {
   return d.slice(0, 5);
 }
 
+// ---------- подробности: смерти, драки, предметы, сравнение, события матча ----------
+
+const CDN = 'https://cdn.cloudflare.steamstatic.com';
+const prettyKey = (k) => String(k || '').replace(/^npc_dota_hero_/, '').replace(/^npc_dota_/, '').replace(/_/g, ' ');
+
+/** Драки: кто сколько потерял, кто выиграл, что делал слабое звено. */
+function buildFights(m, players, losing, culprit) {
+  return (m.teamfights || []).map((f) => {
+    const sumBy = (isLosing, field) => players
+      .filter((p) => (p.team === losing) === isLosing)
+      .reduce((a, p) => a + (f.players?.[p.idx]?.[field] || 0), 0);
+    const ourDeaths = sumBy(true, 'deaths');
+    const theirDeaths = sumBy(false, 'deaths');
+    const x = f.players?.[culprit.idx] || {};
+    const kills = Object.values(x.killed || {}).reduce((a, b) => a + b, 0);
+    return {
+      ts: f.start, t: time(f.start), lengthSec: Math.max(0, (f.end || f.start) - f.start),
+      ourDeaths, theirDeaths,
+      result: theirDeaths > ourDeaths ? 'won' : theirDeaths < ourDeaths ? 'lost' : 'even',
+      ourDamage: sumBy(true, 'damage'), theirDamage: sumBy(false, 'damage'),
+      culprit: {
+        present: (x.damage || 0) > 0 || (x.deaths || 0) > 0 || kills > 0,
+        damage: x.damage || 0, deaths: x.deaths || 0, kills, healing: x.healing || 0,
+        goldDelta: x.gold_delta || 0, buybacks: x.buybacks || 0,
+      },
+    };
+  });
+}
+
+/** Каждая смерть: кто убил, сколько золота потеряно, как была вся игра в этот момент, в драке или нет. */
+function buildDeaths(p, m, adv, fights, nameByKey) {
+  const log = p.deaths_log || [];
+  const buybacks = (p.buyback_log || []).map((b) => b.time);
+  // координаты смертей есть только внутри драк
+  const posByFight = new Map();
+  (m.teamfights || []).forEach((f, i) => {
+    const pos = [];
+    const dp = f.players?.[p.idx]?.deaths_pos || {};
+    for (const [x, ys] of Object.entries(dp)) for (const [y, n] of Object.entries(ys)) for (let k = 0; k < n; k++) pos.push({ x: Number(x), y: Number(y) });
+    posByFight.set(i, pos);
+  });
+  const usedInFight = new Map();
+
+  const items = log.map((d) => {
+    const fi = (m.teamfights || []).findIndex((f) => d.time >= f.start - 5 && d.time <= (f.last_death ?? f.end) + 5);
+    const fight = fi >= 0 ? fights[fi] : null;
+    let pos = null;
+    if (fi >= 0) {
+      const list = posByFight.get(fi) || [];
+      const k = usedInFight.get(fi) || 0;
+      usedInFight.set(fi, k + 1);
+      if (list.length && list.length === (fights[fi].culprit.deaths || 0)) pos = list[k] || null;
+    }
+    const a = adv.length > 1 ? adv[Math.min(adv.length - 1, Math.round(d.time / 60))] : null;
+    return {
+      ts: d.time, t: time(d.time),
+      killer: nameByKey(d.key),
+      goldLost: d.gold_lost || 0, goldFed: d.gold_fed || 0, respawnSec: d.time_dead || 0,
+      advAtDeath: a,
+      aheadWhenDied: a != null && a >= 1500,
+      buyback: buybacks.some((b) => Math.abs(b - d.time) < 45),
+      fight: fight && { t: fight.t, result: fight.result, ourDeaths: fight.ourDeaths, theirDeaths: fight.theirDeaths },
+      alone: !fight,
+      pos,
+    };
+  });
+
+  const killers = Object.entries(p.killed_by || {}).map(([k, n]) => ({ hero: nameByKey(k), count: n })).sort((a, b) => b.count - a.count);
+  return {
+    list: items,
+    totalGoldLost: items.reduce((a, x) => a + x.goldLost, 0),
+    totalGoldFed: items.reduce((a, x) => a + x.goldFed, 0),
+    totalDeadSec: items.reduce((a, x) => a + x.respawnSec, 0),
+    alone: items.filter((x) => x.alone).length,
+    aheadWhenDied: items.filter((x) => x.aheadWhenDied).length,
+    killers,
+  };
+}
+
+/** Ключевые предметы по минутам покупки и итоговый инвентарь. */
+function buildItems(p, itemsConst) {
+  if (!itemsConst || !Object.keys(itemsConst).length) return { key: [], inventory: [] };
+  const info = (key) => {
+    const it = itemsConst[key];
+    return it ? { name: it.dname || prettyKey(key), img: it.img ? CDN + it.img : null, cost: it.cost || 0, assembled: !!it.components } : null;
+  };
+  const byId = new Map(Object.entries(itemsConst).filter(([, v]) => v && v.id != null).map(([k, v]) => [v.id, k]));
+  const key = [];
+  for (const e of p.purchase_log || []) {
+    if (String(e.key).startsWith('recipe_')) continue;
+    const i = info(e.key);
+    if (!i) continue;
+    if ((i.assembled && i.cost >= 1000) || e.key === 'aghanims_shard') key.push({ ts: e.time, t: time(Math.max(0, e.time)), ...i });
+  }
+  const inv = [0, 1, 2, 3, 4, 5, 'n'].map((k) => (k === 'n' ? p.item_neutral : p[`item_${k}`])).filter(Boolean)
+    .map((id) => { const k = byId.get(id); const i = k && info(k); return i && { name: i.name, img: i.img }; }).filter(Boolean);
+  return { key, inventory: inv };
+}
+
+/** Сравнение с оппонентом по роли: строки таблицы. lower: true — чем меньше, тем лучше; null — без оценки. */
+function buildCompare(p, r) {
+  if (!r) return [];
+  const heroTaken = (x) => Object.entries(x.damage_taken || {}).filter(([k]) => k.startsWith('npc_dota_hero_')).reduce((a, [, v]) => a + v, 0);
+  const pct = (v) => (v == null ? null : Math.round(v * 100));
+  const rows = [
+    ['Убийства', p.kills, r.kills, false], ['Смерти', p.deaths, r.deaths, true], ['Помощь', p.assists, r.assists, false],
+    ['GPM', p.gold_per_min, r.gold_per_min, false], ['XPM', p.xp_per_min, r.xp_per_min, false],
+    ['Добито крипов', p.last_hits, r.last_hits, false], ['Отдано крипов', p.denies, r.denies, false],
+    ['Состояние (net worth)', p.net_worth, r.net_worth, false], ['Уровень', p.level, r.level, false],
+    ['Урон по героям', p.hero_damage, r.hero_damage, false], ['Получено урона от героев', heroTaken(p), heroTaken(r), null],
+    ['Лечение', p.hero_healing, r.hero_healing, false], ['Урон по зданиям', p.tower_damage, r.tower_damage, false],
+    ['Оглушения, сек', p.stuns != null ? Math.round(p.stuns) : null, r.stuns != null ? Math.round(r.stuns) : null, false],
+    ['Эффективность линии, %', p.lane_efficiency_pct, r.lane_efficiency_pct, false],
+    ['Участие в драках, %', pct(p.teamfight_participation), pct(r.teamfight_participation), false],
+    ['Обсерверы', p.obs_placed, r.obs_placed, null], ['Сентри', p.sen_placed ?? p.sentry_placed, r.sen_placed ?? r.sentry_placed, null],
+    ['Стаки лагеря', p.camps_stacked, r.camps_stacked, null], ['Руны', p.rune_pickups, r.rune_pickups, null],
+    ['Нейтральные крипы', p.neutral_kills, r.neutral_kills, false], ['Выкупы', p.buyback_count, r.buyback_count, null],
+  ];
+  return rows.filter(([, a, b]) => a != null || b != null).map(([label, me, opp, lower]) => ({ label, me: me ?? 0, opp: opp ?? 0, lower }));
+}
+
+const LANE_RU = { top: 'верх', mid: 'мид', bot: 'низ' };
+/** Башни, казармы, Рошан, Эгида, первая кровь — кому это пошло на пользу. */
+function buildObjectives(m, players, losing, nameBySlot) {
+  const out = [];
+  const loseNum = losing === 'Radiant' ? 2 : 3;
+  const sideOfSlot = (slot) => (slot < 128 ? 'Radiant' : 'Dire');
+  for (const o of m.objectives || []) {
+    if (o.type === 'building_kill') {
+      const key = String(o.key || '');
+      const radiantLost = key.includes('goodguys');
+      const lane = LANE_RU[(/_(top|mid|bot)/.exec(key) || [])[1]];
+      const tower = /tower(\d)/.exec(key);
+      let what = null;
+      if (tower) what = tower[1] === '4' ? 'Башня у трона' : `Башня ${tower[1]} яруса${lane ? ` (${lane})` : ''}`;
+      else if (/rax/.test(key)) what = `${/melee/.test(key) ? 'Казармы ближнего боя' : 'Казармы дальнего боя'}${lane ? ` (${lane})` : ''}`;
+      else if (/fort|ancient/.test(key)) what = 'Трон';
+      if (!what) continue;
+      const benefited = radiantLost ? 'Dire' : 'Radiant';
+      out.push({ ts: o.time, t: time(o.time), text: `${what} (${radiantLost ? 'Radiant' : 'Dire'}) разрушена`, side: benefited === losing ? 'lose' : 'win' });
+    } else if (o.type === 'CHAT_MESSAGE_ROSHAN_KILL') {
+      out.push({ ts: o.time, t: time(o.time), text: 'Рошан убит', side: o.team === loseNum ? 'lose' : 'win' });
+    } else if (o.type === 'CHAT_MESSAGE_AEGIS') {
+      out.push({ ts: o.time, t: time(o.time), text: `${nameBySlot(o.player_slot)} забрал Эгиду`, side: sideOfSlot(o.player_slot) === losing ? 'lose' : 'win' });
+    } else if (o.type === 'CHAT_MESSAGE_FIRSTBLOOD') {
+      out.push({ ts: o.time, t: time(o.time), text: `Первая кровь: ${nameBySlot(o.player_slot)} убил ${nameBySlot(o.victim_player_slot)}`, side: sideOfSlot(o.player_slot) === losing ? 'lose' : 'win' });
+    }
+  }
+  return out.sort((a, b) => a.ts - b.ts).slice(0, 60);
+}
+
+const topCounts = (obj, n, label) => Object.entries(obj || {})
+  .map(([k, v]) => ({ name: label(k), count: v })).filter((x) => x.count > 0).sort((a, b) => b.count - a.count).slice(0, n);
+
 // ---------- главная функция ----------
 
 /**
  * @param m       ответ OpenDota на /matches/{id}
- * @param consts  { heroes } — /constants/heroes
+ * @param consts  { heroes, items } — /constants/heroes и /constants/items (items необязательно: без него нет блока предметов)
  */
 export function analyzeMatch(m, consts) {
   if (!m || !Array.isArray(m.players) || !m.players.length) throw new Error('В ответе OpenDota нет данных игроков');
@@ -325,8 +479,51 @@ export function analyzeMatch(m, consts) {
   const direScore = m.dire_score ?? sum(players.filter((p) => p.team === 'Dire'), (p) => p.kills);
   const scoredBySlot = new Map(scored.map((p) => [p.player_slot, p]));
 
+  // ---- подробная статистика (есть, когда у матча разобран реплей) ----
+  const itemsConst = consts.items || {};
+  const heroByKey = new Map(Object.values(heroes).map((h) => [h.name, h]));
+  const nameByKey = (k) => heroByKey.get(k)?.localized_name || prettyKey(k);
+  const bySlot = new Map(players.map((p) => [p.player_slot, p]));
+  const nameBySlot = (s) => (bySlot.get(s) ? heroName(bySlot.get(s)) : 'Герой');
+  const rivalRaw = ctx.winnerByPos.get(culprit.pos) || null;
+  const shortHero = String(heroData(culprit).name || '').replace('npc_dota_hero_', '');
+  const abilityNice = (k) => String(k).replace(new RegExp(`^${shortHero}_`), '').replace(/_/g, ' ');
+  const fightsList = buildFights(m, players, losing, culprit);
+  const deaths = buildDeaths(culprit, m, adv, fightsList, nameByKey);
+  const deep = {
+    rival: rivalRaw ? view({ ...rivalRaw, role: ROLE_NAME[rivalRaw.pos] }) : null,
+    deaths,
+    fights: fightsList,
+    fightsSummary: {
+      total: fightsList.length,
+      won: fightsList.filter((f) => f.result === 'won').length,
+      lost: fightsList.filter((f) => f.result === 'lost').length,
+      even: fightsList.filter((f) => f.result === 'even').length,
+      culpritPresent: fightsList.filter((f) => f.culprit.present).length,
+      lostWithoutCulprit: fightsList.filter((f) => f.result === 'lost' && !f.culprit.present).length,
+    },
+    items: {
+      me: buildItems(culprit, itemsConst),
+      rival: rivalRaw ? buildItems(rivalRaw, itemsConst) : { key: [], inventory: [] },
+    },
+    compare: buildCompare(culprit, rivalRaw),
+    objectives: buildObjectives(m, players, losing, nameBySlot),
+    series: {
+      nwMe: culprit.networth_t || [],
+      nwRival: rivalRaw?.networth_t || [],
+      xpAdv: (m.radiant_xp_adv || []).map((v) => v * sign),
+    },
+    extras: {
+      abilities: topCounts(culprit.ability_uses, 6, abilityNice),
+      itemUses: topCounts(culprit.item_uses, 6, (k) => itemsConst[k]?.dname || prettyKey(k)),
+      killStreaks: culprit.kill_streaks || {},
+      multiKills: culprit.multi_kills || {},
+    },
+  };
+
   return {
     v: MODEL_VERSION,
+    deep,
     matchId: m.match_id,
     duration: m.duration || 0,
     winner: winning,

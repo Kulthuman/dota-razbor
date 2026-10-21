@@ -52,6 +52,8 @@ async function cached(key, ttl, make) {
 }
 
 const heroes = () => cached('c:heroes', 24 * 3600e3, () => od('/constants/heroes'));
+// предметы нужны для блока «Предметы»; если не загрузились, разбор всё равно строится без него
+const itemsConst = () => cached('c:items', 24 * 3600e3, () => od('/constants/items')).catch(() => ({}));
 
 // ---------- привязанный аккаунт (хранится в Telegram, а если его нет — в браузере) ----------
 
@@ -154,8 +156,8 @@ export async function getReport(matchId) {
   if (matchId === 'demo') return (await fetch('demo.json')).json();
   const hit = lsGet(`an:${matchId}`);
   if (hit && hit.v === MODEL_VERSION) return hit;
-  const [m, h] = await Promise.all([od(`/matches/${matchId}`), heroes()]);
-  const result = analyzeMatch(m, { heroes: h });
+  const [m, h, it] = await Promise.all([od(`/matches/${matchId}`), heroes(), itemsConst()]);
+  const result = analyzeMatch(m, { heroes: h, items: it });
   if (result.detail.parsed) lsSet(`an:${matchId}`, result); // неполные разборы не кэшируем: данные могут появиться позже
   return result;
 }

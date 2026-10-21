@@ -70,6 +70,37 @@
   .two { display: grid; gap: 12px; }
   .note { margin-top: 24px; font-size: 12px; color: var(--dim); }
   .warn { background: color-mix(in srgb, var(--amber) 16%, transparent); border: 1px solid var(--amber); border-radius: 12px; padding: 10px 12px; margin-top: 12px; font-size: 14px; }
+  .pill { display: inline-block; background: var(--track); border-radius: 999px; padding: 2px 9px; font-size: 12px; margin: 4px 4px 0 0; }
+  .pill.bad { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
+  .pill.good { color: var(--green); background: color-mix(in srgb, var(--green) 14%, transparent); }
+  .pill.amber { color: var(--amber); background: color-mix(in srgb, var(--amber) 16%, transparent); }
+  .death, .fight { display: grid; grid-template-columns: 52px 1fr; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+  .death:first-child, .fight:first-child { border-top: 0; }
+  .death time, .fight time { font-variant-numeric: tabular-nums; color: var(--dim); }
+  .sumrow { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .stat { background: var(--track); border-radius: 12px; padding: 8px 12px; flex: 1 1 110px; }
+  .stat b { display: block; font-size: 18px; }
+  .stat span { font-size: 12px; color: var(--dim); }
+  .cols2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .itm { display: grid; grid-template-columns: 44px 32px 1fr; gap: 8px; align-items: center; padding: 4px 0; font-size: 14px; }
+  .itm img { width: 32px; height: 23px; border-radius: 4px; object-fit: cover; background: var(--track); }
+  .itm time { color: var(--dim); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .inv { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+  .inv img { width: 40px; height: 30px; border-radius: 5px; object-fit: cover; background: var(--track); }
+  table.cmp { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.cmp td { padding: 6px 4px; border-top: 1px solid var(--line); }
+  table.cmp tr:first-child td { border-top: 0; }
+  table.cmp td:nth-child(1) { text-align: left; font-weight: 700; width: 28%; }
+  table.cmp td:nth-child(2) { text-align: center; color: var(--dim); font-size: 13px; }
+  table.cmp td:nth-child(3) { text-align: right; font-weight: 700; width: 28%; }
+  table.cmp th { font-size: 12px; color: var(--dim); font-weight: 600; padding-bottom: 6px; }
+  .better { color: var(--green); } .worse { color: var(--red); }
+  .evt { display: grid; grid-template-columns: 52px 12px 1fr; gap: 8px; align-items: baseline; padding: 6px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .evt:first-child { border-top: 0; }
+  .evt time { font-variant-numeric: tabular-nums; color: var(--dim); }
+  .dotc { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  svg.map { width: 100%; max-width: 300px; height: auto; display: block; margin: 10px auto 0; }
+  @media (max-width: 520px) { .cols2 { grid-template-columns: 1fr; } }
   .err { text-align: center; padding: 60px 20px; color: var(--dim); }
   @media (max-width: 520px) {
     .hero { grid-template-columns: 1fr auto; }
@@ -206,6 +237,172 @@ import { getReport, requestParse } from './lib.js';
     return [row, more];
   }
 
+  // ---------- подробные разделы (когда у матча есть разобранный реплей) ----------
+
+  const pill = (text, cls) => el('span', 'pill' + (cls ? ' ' + cls : ''), text);
+  const stat = (value, label) => el('div', 'stat', null, [el('b', null, value), el('span', null, label)]);
+  const dur = (s) => `${Math.floor(s / 60)} мин ${s % 60} с`;
+  const sec = (app, title, ...nodes) => { app.appendChild(el('h2', null, title)); nodes.filter(Boolean).forEach((n) => app.appendChild(n)); };
+
+  // линейный график по минутам для одной или нескольких линий
+  function multiChart(lines, opts = {}) {
+    const n = Math.max(0, ...lines.map((l) => l.data.length));
+    if (n < 2) return el('div', 'sub', 'Нет минутных данных: OpenDota ещё не разобрал реплей.');
+    const W = 720, H = 240, padX = 14, padT = 14, padB = 26;
+    const all = lines.flatMap((l) => l.data);
+    let lo = Math.min(...all), hi = Math.max(...all);
+    if (opts.zero) { hi = Math.max(1000, Math.abs(lo), Math.abs(hi)) * 1.1; lo = -hi; }
+    if (hi === lo) hi = lo + 1;
+    const x = (i) => padX + (i * (W - 2 * padX)) / (n - 1);
+    const y = (v) => padT + ((hi - v) / (hi - lo)) * (H - padT - padB);
+    const s = svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'chart', role: 'img' });
+    if (opts.zero) s.appendChild(svg('line', { x1: padX, x2: W - padX, y1: y(0), y2: y(0), stroke: 'var(--dim)', 'stroke-dasharray': '4 5', opacity: 0.6 }));
+    for (let m = 0; m < n; m += 10) s.appendChild(svg('text', { x: x(m), y: H - 6, fill: 'var(--dim)', 'font-size': 12, 'text-anchor': m === 0 ? 'start' : 'middle' }, `${m}′`));
+    lines.forEach((l) => s.appendChild(svg('polyline', { points: l.data.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' '), fill: 'none', stroke: l.color, 'stroke-width': 3, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' })));
+    const guide = svg('line', { y1: padT, y2: H - padB, stroke: 'var(--dim)', opacity: 0 });
+    const tipBg = svg('rect', { rx: 6, height: 24, fill: 'var(--text)', opacity: 0 });
+    const tip = svg('text', { fill: 'var(--card)', 'font-size': 13, 'font-weight': 700, opacity: 0 });
+    [guide, tipBg, tip].forEach((q) => s.appendChild(q));
+    const show = (ev) => {
+      const b = s.getBoundingClientRect();
+      const m = Math.min(n - 1, Math.max(0, Math.round((((ev.clientX - b.left) / b.width) * W - padX) / ((W - 2 * padX) / (n - 1)))));
+      const text = `${m}′  ` + lines.map((l) => `${l.short || l.name}: ${l.data[m] != null ? fmt(l.data[m]) : '—'}`).join('  ·  ');
+      tip.textContent = text;
+      const w = text.length * 7.2 + 16, tx = Math.min(W - w - 4, Math.max(4, x(m) - w / 2));
+      guide.setAttribute('x1', x(m)); guide.setAttribute('x2', x(m)); guide.setAttribute('opacity', 0.6);
+      tipBg.setAttribute('x', tx); tipBg.setAttribute('y', padT); tipBg.setAttribute('width', w); tipBg.setAttribute('opacity', 0.9);
+      tip.setAttribute('x', tx + 8); tip.setAttribute('y', padT + 17); tip.setAttribute('opacity', 1);
+    };
+    s.addEventListener('pointermove', show); s.addEventListener('pointerdown', show);
+    const legend = el('div', 'legend', null, lines.map((l) => el('span', null, null, [Object.assign(el('i'), { style: `background:${l.color}` }), document.createTextNode(l.name)])));
+    return el('div', null, null, [s, legend]);
+  }
+
+  function deathMap(points) {
+    // координаты OpenDota: примерно 64–192 по обеим осям, база Radiant слева внизу, Dire справа вверху
+    const S = 240, sx = (v) => ((v - 64) / 128) * S, sy = (v) => S - ((v - 64) / 128) * S;
+    const s = svg('svg', { viewBox: `0 0 ${S} ${S}`, class: 'map', role: 'img', 'aria-label': 'Где умирал слабое звено в драках' });
+    s.appendChild(svg('rect', { x: 0, y: 0, width: S, height: S, rx: 12, fill: 'var(--track)' }));
+    s.appendChild(svg('line', { x1: 0, y1: 0, x2: S, y2: S, stroke: 'var(--blue)', opacity: 0.25, 'stroke-width': 18 }));
+    s.appendChild(svg('text', { x: 10, y: S - 10, fill: 'var(--dim)', 'font-size': 11 }, 'Radiant'));
+    s.appendChild(svg('text', { x: S - 10, y: 18, fill: 'var(--dim)', 'font-size': 11, 'text-anchor': 'end' }, 'Dire'));
+    points.forEach((p, i) => {
+      const g = svg('g', {});
+      g.appendChild(svg('circle', { cx: sx(p.x), cy: sy(p.y), r: 8, fill: 'var(--red)', stroke: 'var(--card)', 'stroke-width': 2 }));
+      g.appendChild(svg('text', { x: sx(p.x), y: sy(p.y) + 4, fill: '#fff', 'font-size': 10, 'font-weight': 700, 'text-anchor': 'middle' }, String(i + 1)));
+      s.appendChild(g);
+    });
+    return s;
+  }
+
+  const RES = { won: ['выиграна', 'good'], lost: ['проиграна', 'bad'], even: ['ничья', 'amber'] };
+
+  function deathsSection(r) {
+    const d = r.deep.deaths;
+    if (!d.list.length) return null;
+    let k = 0;
+    const mapNo = d.list.map((x) => (x.pos ? ++k : 0)); // номера на карте идут только по смертям с координатами
+    const rows = d.list.map((x, i) => {
+      const pills = [
+        pill(`−${fmt(x.goldLost)} золота (врагу ${fmt(x.goldFed)})`),
+        pill(`мёртв ${x.respawnSec} с`),
+      ];
+      if (x.advAtDeath != null) pills.push(pill(`команда ${x.advAtDeath >= 0 ? 'впереди' : 'позади'} на ${fmt(Math.abs(x.advAtDeath))}`, x.aheadWhenDied ? 'bad' : ''));
+      pills.push(x.fight ? pill(`драка ${x.fight.t}: ${RES[x.fight.result][0]} (${x.fight.ourDeaths}:${x.fight.theirDeaths})`, RES[x.fight.result][1]) : pill('вне драки — поймали одного', 'amber'));
+      if (x.buyback) pills.push(pill('выкуп', 'good'));
+      if (x.pos) pills.push(pill(`на карте №${mapNo[i]}`));
+      return el('div', 'death' + (x.aheadWhenDied ? ' bad' : ''), null, [el('time', null, x.t), el('div', null, null, [el('b', null, `Убил: ${x.killer}`), el('div', null, null, pills)])]);
+    });
+    const killers = d.killers.length ? el('div', 'sub', `Чаще всего убивали: ${d.killers.slice(0, 4).map((k) => `${k.hero} ×${k.count}`).join(', ')}.`) : null;
+    const pts = d.list.map((x, i) => x.pos && { ...x.pos, i }).filter(Boolean);
+    const sum = el('div', 'sumrow', null, [stat(String(d.list.length), 'смертей'), stat(fmt(d.totalGoldLost), 'золота потеряно'), stat(dur(d.totalDeadSec), 'в мёртвом состоянии'), stat(String(d.aheadWhenDied), 'смертей при перевесе'), stat(String(d.alone), 'вне драк')]);
+    const mapNode = pts.length ? el('div', null, null, [deathMap(d.list.map((x) => x.pos).filter(Boolean)), el('div', 'sub', 'Карта: только смерти внутри драк (для остальных координат нет).')]) : null;
+    return el('div', 'card', null, [sum, ...rows, killers, mapNode]);
+  }
+
+  function fightsSection(r) {
+    const f = r.deep.fights, s = r.deep.fightsSummary;
+    if (!f.length) return null;
+    const sum = el('div', 'sumrow', null, [stat(String(s.total), 'драк'), stat(String(s.won), 'выиграно вашей командой'), stat(String(s.lost), 'проиграно'), stat(String(s.culpritPresent), `с участием ${r.culprit.name}`), stat(String(s.lostWithoutCulprit), 'проиграно без него')]);
+    const rows = f.map((x) => {
+      const c = x.culprit;
+      return el('div', 'fight', null, [el('time', null, x.t), el('div', null, null, [
+        pill(`драка ${RES[x.result][0]}`, RES[x.result][1]),
+        pill(`потери: ваши ${x.ourDeaths} · врага ${x.theirDeaths}`),
+        pill(`урон: ваши ${fmt(x.ourDamage)} · врага ${fmt(x.theirDamage)}`),
+        c.present ? pill(`${r.culprit.name}: урон ${fmt(c.damage)}${c.kills ? `, убийств ${c.kills}` : ''}${c.deaths ? `, погиб ×${c.deaths}` : ''}`, c.deaths && c.damage < 500 ? 'bad' : '') : pill(`${r.culprit.name} не участвовал`, 'amber'),
+      ])]);
+    });
+    return el('div', 'card', null, [sum, ...rows]);
+  }
+
+  function itemsSection(r) {
+    const it = r.deep.items, rv = r.deep.rival;
+    if (!it.me.key.length && !it.rival.key.length) return null;
+    const col = (title, side) => el('div', null, null, [
+      el('b', null, title),
+      ...side.key.map((i) => el('div', 'itm', null, [el('time', null, i.t), imgEl(i.img), el('span', null, i.name)])),
+      side.inventory.length ? el('div', 'inv', null, side.inventory.map((i) => { const im = imgEl(i.img); im.title = i.name; return im; })) : null,
+    ]);
+    const find = (side, name) => side.key.find((i) => i.name === name);
+    const hints = ['Black King Bar', 'Blink Dagger', 'Aghanim\'s Scepter'].map((n) => {
+      const a = find(it.me, n), b = find(it.rival, n);
+      return a || b ? `${n}: ${a ? a.t : 'не купил'} против ${b ? b.t : 'не купил'}` : null;
+    }).filter(Boolean);
+    return el('div', 'card', null, [
+      el('div', 'cols2', null, [col(`${r.culprit.hero} (слабое звено)`, it.me), col(`${rv ? rv.hero : 'Оппонент'} (оппонент)`, it.rival)]),
+      hints.length ? el('div', 'sub', `Тайминги: ${hints.join(' · ')}. Время — когда предмет собран.`) : null,
+    ]);
+  }
+
+  function compareSection(r) {
+    const rv = r.deep.rival, rows = r.deep.compare;
+    if (!rv || !rows.length) return null;
+    const t = el('table', 'cmp');
+    t.appendChild(el('tr', null, null, [el('th', null, r.culprit.hero), el('th', null, ''), Object.assign(el('th', null, rv.hero), { style: 'text-align:right' })]));
+    rows.forEach((x) => {
+      const better = x.lower == null || x.me === x.opp ? 0 : (x.lower ? x.me < x.opp : x.me > x.opp) ? 1 : -1;
+      const a = el('td', better === 1 ? 'better' : better === -1 ? 'worse' : null, fmt(x.me));
+      const c = el('td', better === -1 ? 'better' : better === 1 ? 'worse' : null, fmt(x.opp));
+      t.appendChild(el('tr', null, null, [a, el('td', null, x.label), c]));
+    });
+    return el('div', 'card', null, [t]);
+  }
+
+  function objectivesSection(r) {
+    const o = r.deep.objectives;
+    if (!o.length) return null;
+    return el('div', 'card', null, o.map((e) => {
+      const dot = el('span', 'dotc'); dot.style.background = e.side === 'lose' ? 'var(--green)' : 'var(--red)';
+      return el('div', 'evt', null, [el('time', null, e.t), dot, el('span', null, e.text)]);
+    }));
+  }
+
+  function extrasSection(r) {
+    const e = r.deep.extras, parts = [];
+    const chips = (title, list) => list.length ? el('div', null, null, [el('b', null, title), el('div', null, null, list.map((x) => pill(`${x.name} ×${x.count}`)))]) : null;
+    const MK = { 2: 'двойное убийство', 3: 'тройное убийство', 4: 'четверное убийство', 5: 'пятикратное убийство' };
+    const streaks = Object.entries(e.killStreaks).map(([k, v]) => ({ name: `серия из ${k} убийств`, count: v }));
+    const multi = Object.entries(e.multiKills).map(([k, v]) => ({ name: MK[k] || `${k} убийств сразу`, count: v }));
+    [chips('Способности чаще всего', e.abilities), chips('Предметы в деле', e.itemUses), chips('Серии', [...streaks, ...multi])].forEach((n) => n && parts.push(n));
+    return parts.length ? el('div', 'card', null, parts.flatMap((n, i) => (i ? [el('div', null, null), n] : [n]))) : null;
+  }
+
+  function deepSections(app, r) {
+    const d = r.deep, rv = d.rival;
+    sec(app, 'Ресурсы: слабое звено и оппонент по роли', el('div', 'card', null, [multiChart([
+      { name: `${r.culprit.hero} (состояние)`, short: r.culprit.hero, color: 'var(--blue)', data: d.series.nwMe },
+      ...(d.series.nwRival.length ? [{ name: `${rv ? rv.hero : 'Оппонент'} (состояние)`, short: rv ? rv.hero : 'Оппонент', color: 'var(--amber)', data: d.series.nwRival }] : []),
+    ])]));
+    if (d.series.xpAdv.length > 1) sec(app, 'Опыт: кто впереди', el('div', 'card', null, [multiChart([{ name: 'Разница по опыту (вверх — ваша команда впереди)', short: 'опыт', color: 'var(--green)', data: d.series.xpAdv }], { zero: true })]));
+    sec(app, `Смерти · ${r.culprit.name}`, deathsSection(r));
+    sec(app, 'Командные драки', fightsSection(r));
+    sec(app, 'Предметы: слабое звено и оппонент', itemsSection(r));
+    sec(app, 'Сравнение с оппонентом по роли', compareSection(r));
+    sec(app, 'Ключевые события матча (зелёное — в пользу вашей команды)', objectivesSection(r));
+    sec(app, 'Как играл', extrasSection(r));
+  }
+
   function render(r) {
     const c = r.culprit, app = document.getElementById('app');
     app.textContent = '';
@@ -255,13 +452,14 @@ import { getReport, requestParse } from './lib.js';
     // золото
     app.appendChild(el('h2', null, 'Ход игры'));
     app.appendChild(el('div', 'card', null, [goldChart(r)]));
+    if (r.deep) deepSections(app, r);
 
     // команда проигравших
     app.appendChild(el('h2', null, 'Проигравшая команда · нажми на игрока'));
     app.appendChild(el('div', 'card', null, r.losers.flatMap((p) => loserRow(p, p.name === c.name && p.hero === c.hero))));
 
     // таймлайн
-    if (r.events.length) {
+    if (r.events.length && !(r.deep && r.deep.deaths.list.length)) {
       app.appendChild(el('h2', null, `Таймлайн · ${c.name}`));
       app.appendChild(el('div', 'card', null, r.events.map((e) => el('div', 'ev' + (e.danger ? ' bad' : ''), null, [el('time', null, e.t), el('div', null, null, [el('b', null, e.title), el('div', 'sub', e.text)])]))));
     }
