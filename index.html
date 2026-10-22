@@ -52,6 +52,15 @@
   <h1>Разбор поражений</h1>
   <div class="sub" id="lead">Загружаю…</div>
 
+  <section id="matchBox">
+    <h2>Разбор по номеру матча</h2>
+    <form class="search" id="matchForm">
+      <input id="matchId" type="search" inputmode="numeric" placeholder="Номер матча или ссылка на матч" autocomplete="off" enterkeyhint="go">
+      <button type="submit">Разобрать</button>
+    </form>
+    <div class="sub" id="matchHint" style="margin-top:8px">Номер матча (Match ID) можно скопировать в истории матчей Dota 2 или на opendota.com / dotabuff.com.</div>
+  </section>
+
   <div id="meBox"></div>
 
   <section id="findBox" class="hidden">
@@ -164,6 +173,22 @@ import { account, findPlayers, overview, rankName } from './lib.js';
     $('results').textContent = ''; $('results').appendChild(el('div', 'msg', 'Ищу…'));
     try { renderResults(await findPlayers(q)); }
     catch (err) { $('results').textContent = ''; $('results').appendChild(el('div', 'msg', err.message)); }
+  });
+
+  // Разбор по номеру матча: принимает число или ссылку вида .../matches/123456789
+  $('matchForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const raw = $('matchId').value.trim();
+    const fromLink = raw.match(/matches\/(\d{6,12})/i);
+    const id = fromLink ? fromLink[1] : /^\d{6,12}$/.test(raw) ? raw : null;
+    const hint = $('matchHint');
+    if (!id) {
+      hint.textContent = 'Не похоже на номер матча: нужно число из 6–12 цифр (например 9054536936) или ссылка на матч.';
+      hint.style.color = 'var(--red)';
+      return;
+    }
+    hint.style.color = '';
+    location.href = `report.html?match=${id}`;
   });
 
   loadMe();
